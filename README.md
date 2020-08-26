@@ -2,13 +2,12 @@
 
 **"As a first step, this document is under governance review. When the review completes as appropriate per local and agency processes, the project team will be allowed to remove this notice. This material is draft."**
 
+**General disclaimer** This repository was created for use by CDC programs to collaborate on public health related projects in support of the [CDC mission](https://www.cdc.gov/about/organization/mission.htm).  GitHub is not hosted by the CDC, but is a third party website used by CDC and its partners to share information and collaborate on software. CDC use of GitHub does not imply an endorsement of any one particular service, product, or enterprise. 
+
 ## Overview
 
 MBAgeneratoR is an R shiny application designed to streamline quality control (QC) analyses for serosurveillance studies using the Luminex multiplex bead assay (MBA). This application allows users to upload multiple xPONENT (.csv) and/or BioPlex Manager multi-tab (.xlsx) files and quickly visualize both bead count and median fluorescence intensity (MFI) within each well for every antigen/antibody + plate combination. Users may also generate Levey-Jennings plots to monitor control sample performance. MBAgeneratoR also generates summary tables that (1) tag failed plates and (2) list poor performing controls based on QC parameters set by the user. These summary tables, in addition to merged datasets and high resolution QC plots, can be downloaded in the application.
 
-
-**General disclaimer** This repository was created for use by CDC programs to collaborate on public health related projects in support of the [CDC mission](https://www.cdc.gov/about/organization/mission.htm).  GitHub is not hosted by the CDC, but is a third party website used by CDC and its partners to share information and collaborate on software. CDC use of GitHub does not imply an endorsement of any one particular service, product, or enterprise. 
-  
 ## Public Domain Standard Notice
 This repository constitutes a work of the United States Government and is not
 subject to domestic copyright protection under 17 USC § 105. This repository is in
