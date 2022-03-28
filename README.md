@@ -6,8 +6,6 @@
 
 ## Overview
 
-**SOURCE CODE WILL MADE AVAILABLE IN SUMMER/FALL 2021**
-
 shinyMBA is an R shiny application designed to streamline quality control (QC) analyses for serosurveillance studies using the Luminex multiplex bead assay (MBA). This application allows users to upload multiple xPONENT (.csv) and/or BioPlex Manager multi-tab (.xlsx) files and quickly visualize both bead count and median fluorescence intensity (MFI) within each well for every antigen/antibody + plate combination. Users may also generate control process charts to monitor control sample performance. shinyMBA also generates summary tables that (1) tag failed plates and (2) list poor performing controls based on QC parameters set by the user. These summary tables, in addition to merged datasets and high resolution QC plots, can be downloaded in the application.
 
 ## Public Domain Standard Notice
