@@ -30,7 +30,6 @@ library(parallel)
 library(future)
 library(parallelly)
 library(furrr)
-library(microbenchmark)
 library(lubridate)
 library(hablar)
 
@@ -41,7 +40,7 @@ ui <- fluidPage(
   theme = shinytheme("cerulean"), 
   
   useShinyjs(), #shinyjs is needed to use hide/show on the download output widget
-  useShinyalert(), #shinyalert needed to generate alert windows
+  #useShinyalert(), #shinyalert needed to generate alert windows
 
   titlePanel(tags$b("shinyMBA"), # CSS tag that bolds the title text
              windowTitle = "shinyMBA"), # set the text that appears in browser windows/tabs
@@ -56,6 +55,7 @@ ui <- fluidPage(
   tagList(
    tags$head(tags$script(type="text/javascript", src = "cdcalign.js")), # javascript code that adds in CDC's logo with the correct alignment
    navbarPage(title = "",
+              footer = withTags({hr(b("For assistance, please contact Zach Matson at zmatson@cdc.gov"))}),
               inverse = TRUE, # inverse color scheme
 
 ### MODULE: Upload ####             
@@ -166,6 +166,11 @@ ui <- fluidPage(
                                                       fileInput(inputId = "ljfile", # widget that allows users to upload their custom formatted .csv files
                                                                 label = "Upload .csv formatted data",
                                                                 accept = ".csv")),
+                                     radioButtons(input = "ct_var_choice",
+                                                  label = "Tracking variable",
+                                                  inline = TRUE,
+                                                  choices = c("MFI", "Concentration"),
+                                                  selected = "MFI"),
                                     
                                      pickerInput(inputId = "chart_type", # drop down list widget that switches between control chart types
                                                  label = "Select chart type",
@@ -186,7 +191,7 @@ ui <- fluidPage(
                                                       pickerInput(inputId = "ag_spec", label = "Specify antigens/antibodies", choices = NULL, options = list(`actions-box` = TRUE), multiple = TRUE), # widget that allows users to tell the app which antigens should be paired with the controls
                                                           prettyCheckbox(inputId = "lj_avg", # checkbox widget that tells the app whether to average plate replicates before plotting
                                                                          label = "Average replicates?",
-                                                                         value = FALSE,
+                                                                         value = TRUE,
                                                                          icon = icon("check"),
                                                                          status = "success",
                                                                          animation = "smooth")),
@@ -291,4 +296,5 @@ ui <- fluidPage(
                                    mainPanel())))
              
 ### UI End ####             
-  )))
+  ))) 
+
