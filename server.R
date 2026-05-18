@@ -22,9 +22,7 @@ library(shinyalert)
 library(DT)
 library(parallel)
 library(furrr)
-library(microbenchmark)
 library(lubridate)
-library(profvis)
 library(hablar)
 
 #plan(multicore) # Using multicore will greatly improve download speeds if using a Unix system with multiple CPU's
@@ -40,6 +38,7 @@ server <- function(input, output, session) {
   disable("bqcplots")
   disable("plateplotsaver")
   disable("plateplotsaver_mfi")
+  disable("heatmapsaver_mfi")
   disable("ljsaver")
   disable("lj_summary_saver")
  
@@ -49,51 +48,34 @@ server <- function(input, output, session) {
     execute_safely(file_merger(), # starts merging the user's xPONENT and/or BPM files as soon as they're uploaded
                    title = "File merging error",
                    message = "An improperly formatted output file was submitted.")
-    
-    disable("saver")
-    disable("bqcplots")
-    disable("plateplotsaver")
-    disable("plateplotsaver_mfi")
-    disable("ljsaver")
   })
   
-  observe({ # this hides all of the widgets until the user uploads xPONENT/BPM file(s) or previous shinyMBA datasets
+  observe({ # this inactivates all of the downloads module "generate" widgets until the user uploads xPONENT/BPM file(s) or previous shinyMBA datasets
     
     if (is.null(input$file) & is.null(input$prev_datasets)) {
-      disable("plate_choice")
+      disable("action")  #generate bead count fluctuation plots
+      disable("action2") #generate bead count plate plots
+      disable("action3") #generate raw and summary data 
+      disable("action5") #generate MFI plate plots
+      disable("action7") #generate MFI heatmaps
     } else {
-      enable("plate_choice")
+      enable("action")  #generate bead count fluctuation plots
+      enable("action2") #generate bead count plate plots
+      enable("action3") #generate raw and summary data
+      enable("action5") #generate MFI plate plots
+      enable("action7") #generate MFI heatmaps
     }
 
-    if (is.null(input$ljfile) & is.null(input$file) & is.null(input$prev_datasets)) {
-      disable("action4")
-    } else {
+    if(input$lj_choice == "Formatted Custom Data" & !is.null(input$ljfile) |
+       input$lj_choice == "xPONENT/Bio-Plex Manager" & input$ct_var_choice == "MFI" & !is.null(input$samples2) & !is.null(input$ag_spec) |
+       input$lj_choice == "xPONENT/Bio-Plex Manager" & input$ct_var_choice == "Concentration" & !all(is.na(lj_xp_data()$obs_conc)) & !is.null(input$samples2) & !is.null(input$ag_spec)) {
       enable("action4")
-    }
-
-    if (is.null(input$file) & is.null(input$prev_datasets)) {
-      disable("action3")
+      enable("action6")
     } else {
-      enable("action3")
+      disable("action4")
+      disable("action6")
     }
-
-    if (is.null(input$file) & is.null(input$prev_datasets)) {
-      disable("action")
-    } else {
-      enable("action")
-    }
-
-    if (is.null(input$file) & is.null(input$prev_datasets)) {
-      disable("action2")
-    } else {
-      enable("action2")
-    }
-
-    if (is.null(input$file) & is.null(input$prev_datasets)) {
-      disable("action5")
-    } else {
-      enable("action5")
-    }
+    
     
     if (is.null(input$samples2)) {
       disable("ab_var2")
@@ -163,6 +145,11 @@ server <- function(input, output, session) {
         colnames(med) <- med[1,] #adjusting the column names
         med <- med[-1,] # ^see above
         
+        validate(need( #stops the file merging and informs user that their file has duplicate antigen names
+          any(duplicated(colnames(med))) == FALSE,
+          paste("xPONENT file", input$file$name[n], "contains duplicate antigen names")),
+          errorClass = "merge")
+        
         agab_xp <- med %>% #pulling all antigens/antibodies as a single vector
           select(-c(Location, Sample, `Total Events`)) %>% # removes columns that aren't antigen/antibody names
           colnames() %>% sort() #creates the vector and sorts it alphabetically 
@@ -203,10 +190,36 @@ server <- function(input, output, session) {
                        names_to = "antigen",
                        values_to = "bead_count")
         
+        # extracting observed concentration data #
+        ## see above code for extracting median FI
+        
+        if (any(plate$V2 %in% "Result")) {
+        conc <- plate %>% 
+          slice(((which(.$V2 == "Result"))+1):n()) %>% 
+          filter(V1 != "") %>% 
+          slice(-((which(.$V1 =="DataType:")[1]):n()))
+        
+        colnames(conc) <- conc[1,]
+        conc <- conc[-1,]
+        
+        conc2 <- conc %>% 
+          pivot_longer(all_of(agab_xp),
+                       names_to = "antigen",
+                       values_to = "obs_conc") #%>% 
+          #mutate(obs_conc = as.numeric(obs_conc))
+        
+        merged <- list(med2, netmfi2, bcount2, conc2) %>%
+          reduce(left_join) 
+        } else {
+          merged <- list(med2, netmfi2, bcount2) %>%
+            reduce(left_join) 
+          
+          merged$obs_conc <- NA
+        }
         # merging various data types #
         
-        merged <- list(med2, netmfi2, bcount2) %>%
-          reduce(left_join) 
+        # merged <- list(med2, netmfi2, bcount2) %>%
+        #   reduce(left_join) 
         
         # assigning metadata #
         merged$date <- plate_metadata$V2[1]
@@ -225,6 +238,7 @@ server <- function(input, output, session) {
         
       } else { # BPM data cleaning starts here
         
+              # File merging will stop if BPM files do not have tabs for "FI", "FI - bkgd", or "Bead Count".
         validate(need(getSheetNames(input$file$datapath[n]) %in% "FI", 
                       message = paste("BPM file", input$file$name[n], "is missing FI data")),
                  need(getSheetNames(input$file$datapath[n]) %in% "FI - Bkgd", 
@@ -239,7 +253,7 @@ server <- function(input, output, session) {
                             colNames = FALSE,
                             skipEmptyRows = FALSE)
         
-        sets_l <- length(which(bplex1$X1 == "Type")) #vectorizing the number of appearances of the string "Type" 
+        sets_l <- length(which(bplex1$X1 == "Type")) #vectorizing the number of appearances for the string "Type" 
         
         bplex2 <- bplex1 %>% 
           slice(ifelse(sets_l == 2, 
@@ -266,7 +280,8 @@ server <- function(input, output, session) {
         bplex2 <- bplex2[-1:-2,] %>% 
           filter(!is.na(Well)) # remove well data that is read in as NA
         
-        validate(need(colnames(bplex2) %in% "Description", paste("BPM file", input$file$name[n], "is missing sample IDs")),
+        validate(need(colnames(bplex2) %in% "Description", 
+                      paste("BPM file", input$file$name[n], "is missing sample IDs")),
                  errorClass = "merge") # generates an error message if the bpm file does not have a "Description" column (i.e. sample IDs)
 
         #       #       #       #       #
@@ -282,6 +297,11 @@ server <- function(input, output, session) {
         agab_bpm <- bplex3 %>% # pulling all antigens/antibodies as a single vector
           select(-c(Type, Well, Description)) %>% # removing any columns that aren't antigen/antibody names
           colnames() %>% sort() # creates the vector and sorts is alphabetically
+        
+        validate(need( #stops the file merging and informs user that their file has duplicate antigen names
+          any(duplicated(str_trim(str_replace(agab_bpm, "\\(\\d+\\)", "" )))) == FALSE,
+          paste("BPM file", input$file$name[n], "contains duplicate antigen names")),
+          errorClass = "merge")
         
         bplex4 <- bplex3 %>% 
           pivot_longer(all_of(agab_bpm),
@@ -389,8 +409,70 @@ server <- function(input, output, session) {
                  everything(),
                  -(Type))
         
+        ### reading in observed concentration ###
+        if(any(getSheetNames(input$file$datapath[n]) %in% "Obs Conc")) {
+          
+          bplex_conc1 <- read.xlsx(input$file$datapath[n], 
+                                   sheet = "Obs Conc",
+                                   colNames = FALSE,
+                                   skipEmptyRows = FALSE)
+          
+          sets_concl <- length(which(bplex_conc1$X1 == "Type")) # see net mfi cleaning section
+          
+          bplex_conc2 <- bplex_conc1 %>% 
+            slice(ifelse(sets_bcl == 2, 
+                         which(.$X1 == "Type")[2],
+                         which(.$X1 == "Type"))
+                  +(-1):n())
+          
+          ### cleaning steps ###
+          
+          bplex_conc2[1, 1:3] <- bplex_conc2[2, 1:3]
+          
+          colnames(bplex_conc2) <- bplex_conc2[1,]
+          
+          bplex_conc2 <- bplex_conc2[-1:-2,] %>% 
+            filter(!is.na(Well))
+          
+          #       #       #       #       #
+          
+          bplex_concwell <- bplex_conc2 %>% 
+            filter(str_detect(.$Well, ",") == TRUE) %>% 
+            mutate(Well = str_trim(str_replace(Well, "\\,\\w+", "")))
+          
+          bplex_conc3 <- bind_rows(bplex_concwell, bplex_conc2) %>% 
+            mutate(Well = str_trim(str_replace(Well, "\\w+\\,", "")))
+          
+          
+          bplex_conc4 <- bplex_conc3 %>% 
+            pivot_longer(all_of(agab_bpm), #agab created during net_mfi extraction
+                         names_to = "antigen",
+                         values_to = "obs_conc") %>% 
+            mutate(antigen = str_trim(str_replace(antigen, "\\(\\d+\\)", "" )),
+                   Description = str_trim(str_replace(Description, "\\w+\\s\\w+\\:", "" )))  %>% 
+            select(location = Well,
+                   sample = Description,
+                   everything(),
+                   -(Type))
+          
+          ### merging BPM data ###
+          bpm_merge <- list(bplex4, bplex_mfi4, bplex_bc4, bplex_conc4) %>% 
+            reduce(left_join) %>% 
+            mutate(datetime = dmy_hm(paste(date, time)), 
+                   file_name = input$file$name[n],
+                   batch = str_replace(file_name, "\\_\\d{8}\\_.+", ""), # removing trailing digits/characters from batch name
+                   `total events` = NA) %>% 
+            select(location:net_mfi,
+                   median_fi,
+                   bead_count,
+                   obs_conc, 
+                   `total events`,
+                   datetime,
+                   date:sn, 
+                   batch,
+                   file_name)
+        } else { #if no observed concentration data present
         ### merging BPM data ###
-        
          bpm_merge <- list(bplex4, bplex_mfi4, bplex_bc4) %>% 
           reduce(left_join) %>% 
           mutate(datetime = dmy_hm(paste(date, time)), 
@@ -405,6 +487,9 @@ server <- function(input, output, session) {
                  date:sn, 
                  batch,
                  file_name)
+         
+         bpm_merge$obs_conc <- NA #set obs_conc to missing
+        }
         
         plate_list[[n]] <- bpm_merge
         
@@ -435,16 +520,29 @@ server <- function(input, output, session) {
     req(input$prev_datasets) # prevents prev_file_merger() from running unless the user has uploaded a previous shinyMBA dataset(s)
     
     data1 <- map_dfr(input$prev_datasets$datapath, read.csv, # reads in previous shinyMBA datasets and merges them into a single dataset
-                     check.names = FALSE,
-                     colClasses = c("factor", "factor", "numeric", "factor", "numeric", "numeric",
-                                    "numeric", "numeric","numeric", "numeric","numeric", "numeric",
-                                    "character","character","character", "factor", "factor", "factor")) 
-    
+                     check.names = FALSE)
+
     data2 <- data1 %>% 
       select(-(ut:over_ut)) %>%  #removing bead count dummy variables to make merging with individual xPONENT/BPM files easier
-      mutate(datetime = as_datetime(datetime))
+      mutate(datetime = as_datetime(datetime),
+             date = as.factor(date), # converting these variables to factors makes certain analyses easier to perform later
+             sn = as.factor(sn),
+             batch = as.factor(batch),
+             file_name = as.factor(file_name),
+             sample = as.factor(str_trim(sample, "both")),
+             antigen = as.factor(tolower(.$antigen)),
+             median_fi = as.numeric(median_fi), # this makes sure that R treats these as numerical variables
+             bead_count = as.numeric(bead_count),
+             `total events` = as.numeric(`total events`),
+             net_mfi = as.numeric(net_mfi))#,
+             #obs_conc = ifelse("obs_conc" %in% names(data1), .$obs_conc, NA))
     
-    data2
+    if ("obs_conc" %in% names(data2)){
+      data2
+    } else{
+        data2 %>% 
+        mutate(obs_conc = NA)
+      }
   })
     # master_data() dictates the structure of the central dataset that will be used for analysis in the app
   master_data <- reactive({
@@ -454,14 +552,20 @@ server <- function(input, output, session) {
     } else if (input$master_source == "Only shinyMBA datasets") {
       master <- prev_file_merger()
     } else {
-      master <- bind_rows(prev_file_merger(), file_merger())
+      master <- bind_rows(prev_file_merger(), file_merger()) %>% 
+        mutate(#datetime = as_datetime(datetime),
+               date = as.factor(date), # converting these variables to factors makes certain analyses easier to perform later
+               sn = as.factor(sn),
+               batch = as.factor(batch),
+               file_name = as.factor(file_name),
+               sample = as.factor(str_trim(sample, "both")),
+               antigen = as.factor(tolower(.$antigen)))
     }
     
     master
   })
   
   beadcount <- reactive({ #creates a separate dataset with just bead count data
-    
     master_data() %>% 
       select(-c(median_fi, net_mfi)) %>%
       pivot_wider(names_from = antigen,
@@ -474,7 +578,7 @@ server <- function(input, output, session) {
     data1 <- master_data()
     
     lj_preclean <- data1 %>%
-      select(location:median_fi, date:batch, datetime, -c(`total events`, date, time)) %>% # selecting only the needed variables
+      select(location:median_fi, obs_conc, date:batch, datetime, -c(`total events`, date, time)) %>% # selecting only the needed variables
       group_by(sample, antigen) %>% # groups observations by sample ID's and antigens
       arrange(datetime) # orders data by datetime (earliest to latest)
     
@@ -488,13 +592,14 @@ server <- function(input, output, session) {
       filter(n >= 2) %>% # removes any data with a single observation (control tracking analyses cannot be performed unless there are >1 observations)
       select(-(n)) %>% # keep all variables except observation number
       mutate(antigen = as.factor(as.character(antigen)), # refactoring the antigen and sample variables
-             sample = as.factor(as.character(sample))) 
+             sample = as.factor(as.character(sample)),
+             obs_conc = as.numeric(obs_conc))
     
     lj_clean
   })  
   
   lj_data <- reactive({ #this function cleans the user's data into a format needed to perform Levey-Jennings (LJ) analyses
-      
+    
       if (input$lj_choice == "Formatted Custom Data"){ # custom formatted data cleaning starts here
         
         req(input$ljfile)
@@ -540,15 +645,22 @@ server <- function(input, output, session) {
                    sample = as.factor(as.character(sample))) %>% # refactors sample variable
             group_by(sample, antigen, batch, datetime) %>% # groups sample duplicates for each plate together
             summarize(reps = n(),
-                      avg_mfi = mean(median_fi, na.rm = TRUE)) %>% # averages sample duplicates for each plate
-            select(everything(), median_fi = avg_mfi) %>% 
+                      avg_mfi = mean(median_fi, na.rm = TRUE),
+                      avg_conc = mean(obs_conc, na.rm = TRUE)) %>% # averages sample duplicates for each plate
+            select(everything(), median_fi = avg_mfi, obs_conc = avg_conc) %>% 
             group_by(sample, antigen) %>% # grouping sample ID's and antigens before chronologically ordering the data
             arrange(datetime) %>% # arranging the data in chronological order (this is required to properly conduct control tracking analyses)
             nest() # nesting the dataframe so iterative map functions can be used later
        }
     } # xPONENT/Bio-Plex Manager cleaning ends here
     
-      lj_cleanup <- function(df) { # this function will be used to conduct process control chart analyses on either the custom or xPONENT/BPM data that was cleaned earlier 
+    if (input$ct_var_choice == "MFI") {
+      ct_var <- "median_fi"
+    } else {
+      ct_var <- "obs_conc"
+    } # use get(ct_var) to call the appropriate variable
+    
+      lj_cleanup_mfi <- function(df) { # this function will be used to conduct process control chart analyses on either the custom or xPONENT/BPM data that was cleaned earlier 
         
         if (input$chart_type == "Shewhart") {
           d1 <- slice(df, 1:input$shew_ref) # Shewhart analyses calculates CL's from a subset of data points selected by the user
@@ -624,27 +736,103 @@ server <- function(input, output, session) {
         d3
       }
       
+      lj_cleanup_conc <- function(df) { # this function will be used to conduct observed concentration process control chart analyses on either the custom or xPONENT/BPM data that was cleaned earlier 
+        
+        if (input$chart_type == "Shewhart") {
+          d1 <- slice(df, 1:input$shew_ref) # Shewhart analyses calculates CL's from a subset of data points selected by the user
+        } else {
+          d1 <- df # LJ and I-MR analyses calculates CL's from all data points
+        }
+        
+        d1 <- d1 %>% 
+          mutate(mr = abs(obs_conc - lag(obs_conc))) # creates a variable for the point-to-point moving range
+        
+        conc_avg <- mean(d1$obs_conc, na.rm = TRUE) #observed concentration average
+        mr_avg <- mean(d1$mr, na.rm = TRUE) # moving range average
+        mr_sd <- mr_avg / 1.128 # I-MR standard deviation calculated using n = 2 observations constant of 1.128
+        
+        if (input$chart_type == "Moving Range"){ # confidence limit determination for I-MR charts
+          
+          lim3 <- list(ucl = conc_avg + (3 * mr_sd), # I-MR 3-sigma limits
+                       cl  = conc_avg,
+                       lcl = conc_avg - (3 * mr_sd))
+          
+          lim2 <- list(ucl = conc_avg + (2 * mr_sd), # I-MR 2-sigma limits
+                       cl  = conc_avg,
+                       lcl = conc_avg - (2 * mr_sd))
+          
+          lim1 <- list(ucl = conc_avg + mr_sd, # I-MR 1-sigma limits
+                       cl  = conc_avg,
+                       lcl = conc_avg - mr_sd)
+        } else { # LJ and Shewhart confidence limit calculations
+          
+          lim3 <- CalculateLimits(d1$obs_conc, 
+                                  type = "i") # calculates the 3-sigma limits
+          lim2 <- CalculateLimits(d1$obs_conc, 
+                                  controlLimitDistance = 2, 
+                                  type = "i") # calculates the 2-sigma limits
+          lim1 <- CalculateLimits(d1$obs_conc, 
+                                  controlLimitDistance = 1,
+                                  type = "i") # calculates the 1-sigma limits
+        }
+        
+        d2 <- EvaluateRules(df$obs_conc, # Control tracking analysis using Rspc package. See https://cran.r-project.org/web/packages/Rspc/index.html
+                            type = "i",
+                            controlLimitDistance = 3,
+                            ucl = round(lim3[[1]], 2),
+                            cl = round(lim3[[2]], 2),
+                            lcl = round(lim3[[3]], 2)) # LJ analyses 
+        
+        d3 <- d2 %>% # cleaning up resulting control tracking analyses for use in upcoming plots + tables
+          mutate(obs = row_number(),
+                 mr = abs(x - lag(x)),
+                 mr_avg = mr_avg,
+                 mr_ucl = (3.267 * mr_avg),
+                 cl = round(lim3[[2]], 0), #calculating confidence limits
+                 ucl3 = round(lim3[[1]], 0),
+                 lcl3 = round(lim3[[3]], 0),
+                 ucl2 = round(lim2[[1]], 0),
+                 lcl2 = round(lim2[[3]], 0),
+                 ucl1 = round(lim1[[1]], 0),
+                 lcl1 = round(lim1[[3]], 0),
+                 # r1-r8 will assess whether any of the Nelson rules were violated
+                 r1 = ifelse(Rule1 == 1, "1,", ""), 
+                 r2 = ifelse(Rule2 == 1, "2,", ""),
+                 r3 = ifelse(Rule3 == 1, "3,", ""),
+                 r4 = ifelse(Rule4 == 1, "4,", ""),
+                 r5 = ifelse(Rule5 == 1, "5,", ""),
+                 r6 = ifelse(Rule6 == 1, "6,", ""),
+                 r7 = ifelse(Rule7 == 1, "7,", ""),
+                 r8 = ifelse(Rule8 == 1, "8", ""),
+                 status = case_when(
+                   rowSums(select(., contains("Rule"))) > 0 & is.na(x) == FALSE  ~ lj_status()[2], # criteria for out of control points
+                   rowSums(select(., contains("Rule"))) == 0 & is.na(x) == FALSE ~ lj_status()[1]),
+                 vio = ifelse(status == lj_status()[1], NA, paste(r1,r2,r3,r4,r5,r6,r7,r8, sep = ""))) # concatenating all of the violated rules as a single string
+        
+        d3
+      }
+      
       lj_final <- lj_clean %>% 
-        mutate(lj = map(data, lj_cleanup)) %>% # map lj_cleanup() to iteratively run LJ analyses for each sample+antigen combination. DO NOT USE future_map
+        mutate(lj = map(data, ifelse(input$ct_var_choice == "MFI", 
+                                     lj_cleanup_mfi,
+                                     lj_cleanup_conc))) %>% # map lj_cleanup() to iteratively run LJ analyses for each sample+antigen combination. DO NOT USE future_map
         unnest(cols = c(data, lj)) # unnesting to restore the dataframe
       
       lj_final
-    })
+    }) 
   
   lj_data_23sd <- reactive({ # creates a separate dataset for CL2-CL3 violation types
-    
     data1 <- lj_data() %>%  
       mutate(status = case_when( # changing the status variable to fit the 2CL-3CL analysis
         Rule1 == 1                     ~ lj_status()[2], # criteria for "Out of Control" datapoints
-        Rule1 == 0 & median_fi >= ucl2 ~ lj_status()[3], # criteria for "2CL Warning" datapoints
-        Rule1 == 0 & median_fi <= lcl2 ~ lj_status()[3],
-        Rule1 == 0 & ucl2 >= median_fi & median_fi >= lcl2 ~ lj_status()[1])) # criteria for "In Control" datapoints
+        Rule1 == 0 & get(lj_var()) >= ucl2 ~ lj_status()[3], # criteria for "2CL Warning" datapoints
+        Rule1 == 0 & get(lj_var()) <= lcl2 ~ lj_status()[3],
+        Rule1 == 0 & ucl2 >= get(lj_var()) & get(lj_var()) >= lcl2 ~ lj_status()[1])) # criteria for "In Control" datapoints
     
     data1
   })
   
   mr_data <- reactive({ # separate dataset that be used for the moving range plot (NOT individuals)
-    
     data1 <- lj_data() %>% 
       mutate(status = ifelse(mr >= mr_ucl, # points are defined as "Out of Control" if moving range is higher than the upper confidence limit
                              lj_status()[2],
@@ -655,7 +843,6 @@ server <- function(input, output, session) {
   #### DYNAMIC VECTORS (QC PLOTS) ####
   
   ag_names <- reactive({ # this reactive function will generate a vector containing all of the antigens/antibodies tested in the plate chosen by the user
-    
     req(input$plates)
     
     subset1 <- master_data() %>% 
@@ -700,16 +887,23 @@ server <- function(input, output, session) {
   })
   
   #### DYNAMIC VECTORS (CONTROL TRACKING) ####
+  lj_var <- reactive({
+    if (input$ct_var_choice == "MFI") {
+      var <- "median_fi"
+    } else {
+      var <- "obs_conc"
+    } # use get(ct_var) to call the appropriate variable
+    
+    var
+  })
   
   lj_antigens <- reactive({ # creates a dynamic vector of the antigen names for use in LJ analyses
-    
     data1 <- lj_data()
     
     levels(data1$antigen) %>% sort()
   })
   
   lj_controls <- reactive({ # creates a dynamic vector of the sample/control names for use in LJ analyses
-    
     data1 <- lj_data()
     
     levels(data1$sample) %>% sort()
@@ -736,17 +930,13 @@ server <- function(input, output, session) {
   })
    
   observe({ # tells the app to update the "samples3" UI widget once the user specifies their controls
-
-   
     if (!is.null(input$samples2) & !is.null(input$ag_spec)) {
       updateSelectInput(session = session, inputId = "samples3", label = "Choose a control", choices = input$samples2)
       updateSelectInput(session = session, inputId = "ab2", label = "Choose an antigen/antibody", choices = input$ag_spec)
-      
     }
   })
   
   lj_status <- reactive({ # character vector used for control tracking flagging 
-    
     statuses <- c("In control", "Out of control", "CL2 Warning")
     statuses
   })
@@ -754,38 +944,42 @@ server <- function(input, output, session) {
   #### MERGED AND SUMMARY DATA OUTPUT  ####
   
   raw_data <- reactive({ #cleaning up the raw data that will be downloaded by the user
-    
     raw1 <- left_join(master_data(), all_plots_data()) %>% 
       select(-c(observation, mean, per_under_ut, per_under_lt), status2 = utlt) %>%
-      select(location:net_mfi, median_fi, bead_count, ut:over_ut, datetime, date:file_name) 
+      select(location:net_mfi, median_fi, bead_count, obs_conc, ut:over_ut, datetime, date:file_name) 
     
     raw1
   })
   
   raw_data_wide <- reactive({ # reformatting raw data in a wide format for users to download
-    
     data1 <- raw_data()
     
     bc_wide1 <- data1 %>% # this creates a wide dataframe for the bead count data
-      select(-c(median_fi, net_mfi, ut:over_ut)) %>% 
+      select(-c(median_fi, net_mfi, obs_conc, ut:over_ut)) %>% 
       pivot_wider(names_from = "antigen",
                   values_from = "bead_count",
                   names_prefix = "bead_count_")
     
     mfi_wide1 <- data1 %>% # this creates a wide dataframe for the mfi data
-      select(-c(median_fi, bead_count, ut:over_ut)) %>% 
+      select(-c(median_fi, bead_count, obs_conc, ut:over_ut)) %>% 
       mutate(net_mfi = round(net_mfi, 0)) %>% 
       pivot_wider(names_from = "antigen",
                   values_from = "net_mfi",
                   names_prefix = "mfi_")
     
-    wide_merge <- left_join(bc_wide1, mfi_wide1) #merging the wide bead count and mfi data into a single dataframe
+    conc_wide1 <- data1 %>% # this creates a wide dataframe for the observed concentration data
+      select(-c(median_fi, net_mfi, bead_count, ut:over_ut)) %>% 
+      pivot_wider(names_from = "antigen",
+                  values_from = "obs_conc",
+                  names_prefix = "obs_conc_")
+    
+    wide_merge <- left_join(bc_wide1, mfi_wide1) %>% #merging the wide bead count and mfi data into a single dataframe
+      left_join(., conc_wide1)
     
     wide_merge
   })
   
   psum_ut <- reactive({ #this reactive function creates a % < the upper threshold summary dataframe for wells 
-    
     psum_ut1 <- beadcount()
     
     psum_ut2 <- psum_ut1 %>% 
@@ -802,7 +996,6 @@ server <- function(input, output, session) {
   })
   
   psum_lt <- reactive({ #this reactive function creates a % < the lower threshold summary dataframe for wells 
-    
     psum_lt1 <- beadcount()
     
     psum_lt2 <- psum_lt1 %>% 
@@ -819,7 +1012,6 @@ server <- function(input, output, session) {
   })
   
   bc_summary <- reactive({ # generates a dataframe summarizing batch + antigen bead count failures 
-    
     data1 <- all_plots_data() %>% 
       select(antigen, batch, location, bead_count, under_lt, under_ut) %>% 
       filter(!is.na(bead_count)) %>% 
@@ -836,13 +1028,11 @@ server <- function(input, output, session) {
   })
   
   bc_summary2 <- reactive({ # generates a dataframe summarizing batch bead count failures
-    
     data1 <- bc_summary() %>% 
       group_by(batch) %>% 
       nest() # nesting the data by batch so the following functions can be iteratively applied
     
     batch_fail <- function (df) { # function that will subset antigen bead count fails within a plate and then concatenate the failed antigen names together
-      
       fdata1 <- df
       
       fdata2  <- fdata1 %>%  
@@ -853,7 +1043,6 @@ server <- function(input, output, session) {
     }
     
     n_badag <- function (df) { # function that sums the number of antigens within a plate whose bead count failed 
-      
       ffdata1 <- df
       
       sum(ffdata1$status_flag)
@@ -889,11 +1078,12 @@ server <- function(input, output, session) {
       mutate(ooc = ifelse(status == lj_status()[2], 1, 0)) %>% 
       group_by(sample, antigen) # summary statistics applied to each control-antigen/antibody combination
     
+  if (input$ct_var_choice == "MFI"){
     summary1 <- summarize(data2, 
                           n = n(),
                           n_missing = sum(is.na(median_fi)),
                           mean_mfi = round(mean(median_fi, na.rm = TRUE), 1),
-                          mean_mr = round(mean(mr, na.rm = TRUE), 1),
+                          mean_mr_mfi = round(mean(mr, na.rm = TRUE), 1),
                           mr_ucl = round(mean(mr_ucl, na.rm = TRUE), 1),
                           median_mfi = round(median(median_fi, na.rm = TRUE), 1),
                           max_mfi = max(median_fi, na.rm = TRUE),
@@ -922,7 +1112,41 @@ server <- function(input, output, session) {
                           rule6_violations = sum(Rule6),
                           rule7_violations = sum(Rule7),
                           rule8_violations = sum(Rule8))
-    
+  } else { #observed concentration
+    summary1 <- summarize(data2, 
+                          n = n(),
+                          n_missing = sum(is.na(obs_conc)),
+                          mean_conc = round(mean(obs_conc, na.rm = TRUE), 2),
+                          mean_mr_conc = round(mean(mr, na.rm = TRUE), 2),
+                          mr_ucl = round(mean(mr_ucl, na.rm = TRUE), 2),
+                          median_conc = round(median(obs_conc, na.rm = TRUE), 1),
+                          max_conc = round(max(obs_conc, na.rm = TRUE), 2),
+                          min_conc = round(min(obs_conc, na.rm = TRUE), 2),
+                          sd_conc = round(sd(obs_conc, na.rm = TRUE), 2),
+                          upper_cl3 = mean(ucl3),
+                          lower_cl3 = mean(lcl3),
+                          upper_cl2 = mean(ucl2),
+                          lower_cl2 = mean(lcl2),
+                          upper_cl1 = mean(ucl1),
+                          lower_cl1 = mean(lcl1),
+                          out_of_control = percent((sum(ooc)/n), accuracy = 0.01),
+                          total_violations = sum(Rule1,
+                                                 Rule2,
+                                                 Rule3,
+                                                 Rule4,
+                                                 Rule5,
+                                                 Rule6,
+                                                 Rule7,
+                                                 Rule8),
+                          rule1_violations = sum(Rule1),
+                          rule2_violations = sum(Rule2),
+                          rule3_violations = sum(Rule3),
+                          rule4_violations = sum(Rule4),
+                          rule5_violations = sum(Rule5),
+                          rule6_violations = sum(Rule6),
+                          rule7_violations = sum(Rule7),
+                          rule8_violations = sum(Rule8))
+  }
     summary1
   })
   
@@ -934,18 +1158,21 @@ server <- function(input, output, session) {
         select(obs, 
                Control = sample, 
                Antigen = antigen, 
-               MFI = median_fi, 
+               MFI = median_fi,
                MR = mr,
                Status = status, 
                Violations = vio)
     } else { # xPONENT/BPM data
         table1 <- lj_data() %>% 
+          mutate(obs_conc = round(obs_conc, 2),
+                 mr = round(mr, 2)) %>% 
           select(Obs = obs, 
                  Date = datetime, 
                  Control = sample, 
                  Antigen = antigen, 
                  Batch = batch, 
                  MFI = median_fi,
+                 Concentration = obs_conc,
                  MR = mr,
                  Status = status, 
                  Violations = vio)
@@ -973,6 +1200,7 @@ server <- function(input, output, session) {
              ooc2sd = ifelse(status == lj_status()[3], 1, 0)) %>% 
       group_by(sample, antigen) # summary statistics applied to each control-antigen/antibody combination
     
+  if (input$ct_var_choice == "MFI") {
     summary1 <- summarize(data2, 
                                  n = n(),
                                  n_missing = sum(is.na(median_fi)),
@@ -991,7 +1219,26 @@ server <- function(input, output, session) {
                                  per_outside_CL3 = percent((n_outside_CL3/n), accuracy = 0.01),
                                  n_between_CL2_CL3 = sum(ooc2sd, na.rm = TRUE),
                                  per_between_CL2_CL3 = percent((n_between_CL2_CL3/n), accuracy = 0.01))
-    
+  } else { #observed concentration
+    summary1 <- summarize(data2, 
+                          n = n(),
+                          n_missing = sum(is.na(obs_conc)),
+                          mean_conc = round(mean(obs_conc, na.rm = TRUE), 2),
+                          mean_mr = round(mean(mr, na.rm = TRUE), 2),
+                          mr_ucl = round(mean(mr_ucl, na.rm = TRUE), 2),
+                          median_conc = round(median(obs_conc, na.rm = TRUE), 2),
+                          max_conc = round(max(obs_conc, na.rm = TRUE), 2),
+                          min_conc = round(min(obs_conc, na.rm = TRUE), 2),
+                          sd_conc = round(sd(obs_conc, na.rm = TRUE), 2),
+                          upper_cl3 = mean(ucl3),
+                          lower_cl3 = mean(lcl3),
+                          upper_cl2 = mean(ucl2),
+                          lower_cl2 = mean(lcl2),
+                          n_outside_CL3 = sum(ooc3sd, na.rm = TRUE),
+                          per_outside_CL3 = percent((n_outside_CL3/n), accuracy = 0.01),
+                          n_between_CL2_CL3 = sum(ooc2sd, na.rm = TRUE),
+                          per_between_CL2_CL3 = percent((n_between_CL2_CL3/n), accuracy = 0.01))
+  }
     summary1
   })
   
@@ -1004,17 +1251,21 @@ server <- function(input, output, session) {
                Control = sample, 
                Antigen = antigen, 
                MFI = median_fi,
+               Concentration = obs_conc,
                MR = mr,
                Status = status)
       
     } else { #xPONENT/BPM data
       table1 <- lj_data_23sd() %>% 
+        mutate(obs_conc = round(obs_conc, 2),
+               mr = round(mr, 2)) %>%
         select(Obs = obs, 
                Date = datetime, 
                Control = sample, 
                Antigen = antigen, 
                Batch = batch, 
                MFI = median_fi,
+               Concentration = obs_conc,
                MR = mr,
                Status = status)
     }
@@ -1025,7 +1276,6 @@ server <- function(input, output, session) {
   mr_summary_small <- reactive({ # control tracking data table specific for the point-to-point moving range chart (NOT individuals)
     
     if (input$lj_choice == "Formatted Custom Data"){
-      
       table1 <- mr_data() %>% 
         filter(sample %in% lj_controls()) %>% 
         select(obs, 
@@ -1034,16 +1284,17 @@ server <- function(input, output, session) {
                MFI = median_fi,
                MR = mr,
                Status = status)
-      
     } else {
-      
       table1 <- mr_data() %>% 
+        mutate(obs_conc = round(obs_conc, 2),
+               mr = round(mr, 2)) %>%
         select(Obs = obs, 
                Date = datetime, 
                Control = sample, 
                Antigen = antigen, 
                Batch = batch, 
                MFI = median_fi,
+               Concentration = obs_conc,
                MR = mr,
                Status = status)
     }
@@ -1053,6 +1304,9 @@ server <- function(input, output, session) {
 
   #### DATA MANIPULATION FOR QC PLOTS ####
   all_plots_data <- reactive({ # this reactive object creates a dataset that will be used for generating plots in the app
+    
+    #req(input$file | input$prev_datasets) # prevents the function from running until the user uploads a file
+    #req(isTruthy(input$file) || isTruthy(input$prev_datasets))
     
     plots1 <- beadcount()
     
@@ -1080,6 +1334,8 @@ server <- function(input, output, session) {
       mutate(antigen = as.factor(antigen)) # refactoring antigen variable
     
     # MFI plots data cleaning #
+    # mfi_data1 <- file_merger() %>% 
+    #   group_by(batch, antigen)
     mfi_data1 <- master_data() %>% 
       group_by(batch, antigen)
     
@@ -1164,7 +1420,9 @@ server <- function(input, output, session) {
    plot1 <- ggplot(pdata2, aes(x = cols_n, y = rows_n))+ # generating the display plot
       geom_point(data=expand.grid(seq(1, 12), seq(1, 8)), aes(x=Var1, y=Var2), color = "grey50",
                  fill = "white", shape = 21, size = 12)+ 
-      geom_point(aes(color = utlt2), size = 15)+
+      geom_point(aes(color = utlt2), 
+                 size = 15, 
+                 show.legend = TRUE)+ #show.legend = TRUE used to override missing factor level omission in the legend. 
       geom_text(aes(label = bead_count), size = 5)+
       scale_y_reverse(breaks = seq(1, 8),
                       limits = c(8.25, 0.75),
@@ -1183,7 +1441,10 @@ server <- function(input, output, session) {
       theme(plot.title = element_text(size = 22, face = "bold", hjust = 0.5),
             legend.position = "right",
             legend.text = element_text(size = 16),
-            panel.border = element_rect(color = "black", fill = NA, size = 2),
+            panel.border = element_rect(color = "black", 
+                                        fill = NA, 
+                                        #size = 2),
+                                        linewidth = 2),
             strip.text.x = element_text(size = 16),
             axis.title = element_text(size = 16),
             axis.text = element_text(size = 14))
@@ -1218,11 +1479,27 @@ server <- function(input, output, session) {
       rename(`bead count` = bead_count)
     
     plot1 <- ggplot(pdata2, aes(label = location))+ # this block of code makes the bead QC plot that is outputed when plot_output() is called
-      geom_hline(yintercept = input$lthresh, linetype = "dashed", color = "red", size = 1, alpha = 0.5)+
-      geom_hline(yintercept = input$uthresh, linetype = "dashed", color = "forestgreen", size = 1, alpha = 0.5)+
-      geom_hline(yintercept = mean(pdata2$`bead count`), color = "blue", size = 1, alpha = 0.3)+
+      geom_hline(yintercept = input$lthresh, 
+                 linetype = "dashed", 
+                 color = "red", 
+                 #size = 1,
+                 linewidth = 1,
+                 alpha = 0.5)+
+      geom_hline(yintercept = input$uthresh, 
+                 linetype = "dashed", 
+                 color = "forestgreen", 
+                 #size = 1, 
+                 linewidth = 1,
+                 alpha = 0.5)+
+      geom_hline(yintercept = mean(pdata2$`bead count`), 
+                 color = "blue", 
+                 #size = 1,
+                 linewidth = 1,
+                 alpha = 0.3)+
       geom_line(aes(x = observation, y = `bead count`), alpha = 0.3)+
-      geom_point(aes(x = observation, y = `bead count`, color = fct_rev(status)), size = 2)+
+      geom_point(aes(x = observation, y = `bead count`, color = fct_rev(status)), 
+                 size = 2,
+                 show.legend = TRUE)+ #show.legend = TRUE used to override missing factor level omission in the legend.
       scale_y_continuous(limits = c(0, NA))+
       scale_x_continuous(breaks = c(1, 12, 24, 36, 48, 60, 72, 84, 96))+
       labs(x = "Well order",
@@ -1253,7 +1530,9 @@ server <- function(input, output, session) {
     ggplot(pdata2, aes(x = cols_n, y = rows_n))+ # generating the display plot
       geom_point(data=expand.grid(seq(1, 12), seq(1, 8)), aes(x=Var1, y=Var2), color = "grey50",
                  fill = "white", shape = 21, size = 12)+
-      geom_point(aes(color = mfi_well_status), size = 15)+
+      geom_point(aes(color = mfi_well_status), 
+                 size = 15,
+                 show.legend = TRUE)+ #show.legend = TRUE used to override missing factor level omission in the legend.
       geom_text(aes(label = net_mfi), size = 4)+
       scale_y_reverse(breaks = seq(1, 8),
                       limits = c(8.25, 0.75),
@@ -1342,7 +1621,9 @@ server <- function(input, output, session) {
         facet_wrap(.~antigen, drop = TRUE)+ # faceting the batch plots by antigen and dropping any antigen levels that are not present in the batch
         geom_point(data=expand.grid(seq(1, 12), seq(1, 8)), aes(x=Var1, y=Var2), color = "grey50",
                    fill = "white", shape = 21, size = 4)+ #5 4 3
-        geom_point(aes(color = utlt), size = 7.5)+ #8 7 6
+        geom_point(aes(color = utlt), 
+                   size = 7.5,
+                   show.legend = TRUE)+ #show.legend = TRUE used to override missing factor level omission in the legend.
         geom_text(aes(label = bead_count), size = 2.5)+ #3
         scale_y_reverse(breaks = seq(1, 8),
                         limits = c(8.25, 0.75),
@@ -1406,7 +1687,9 @@ server <- function(input, output, session) {
         geom_hline(aes(yintercept = ut), linetype = "dashed", color = "forestgreen", size = 0.5, alpha = 0.5)+
         geom_line(aes(x = observation, y = bead_count), alpha = 0.25)+
         geom_hline(aes(yintercept = mean), color = "blue", size = 0.5, alpha = 0.3)+
-        geom_point(aes(x = observation, y = bead_count, color = fct_rev(status)), size = 1.5)+
+        geom_point(aes(x = observation, y = bead_count, color = fct_rev(status)), 
+                   size = 1.5,
+                   show.legend = TRUE)+ #show.legend = TRUE used to override missing factor level omission in the legend
         scale_y_continuous(limits = c(0,NA))+
         labs(x = "Well order",
              y = "Bead count",
@@ -1430,8 +1713,8 @@ server <- function(input, output, session) {
     
     data3 <- data2 %>% 
       mutate(plots = map(data, qcplot_maker),
-             filename = paste0(batch, ".png"),
-             panels = ) %>% 
+             filename = paste0(batch, ".png")) %>% #,
+             #panels = ) %>%  ## I'm not sure why I put this here...
       ungroup() %>% 
       select(plots, filename)
     
@@ -1461,7 +1744,9 @@ server <- function(input, output, session) {
         facet_wrap(.~antigen, drop = TRUE)+
         geom_point(data=expand.grid(seq(1, 12), seq(1, 8)), aes(x=Var1, y=Var2), color = "grey50",
                    fill = "white", shape = 21, size = 4) +
-        geom_point(aes(color = mfi_well_status), size = 7.5)+
+        geom_point(aes(color = mfi_well_status), 
+                   size = 7.5,
+                   show.legend = TRUE)+ #show.legend = TRUE used to override missing factor level omission in the legend.
         geom_text(aes(label = net_mfi), size = 1.5)+
         scale_y_reverse(breaks = seq(1, 8),
                         limits = c(8.25, 0.75),
@@ -1569,11 +1854,13 @@ server <- function(input, output, session) {
       set_sample <- input$samples3
       set_ag <- input$ab2
       }
-      
+    
     data2 <- data1 %>% 
       filter(sample == set_sample,
              antigen == set_ag) %>% 
-      rename(`Median FI` = median_fi, Violations = vio)
+      rename(`Median FI` = median_fi, Concentration = obs_conc, Violations = vio)
+    
+  if (input$ct_var_choice == "MFI") {
       
     if (input$lj_choice == "Formatted Custom Data") {
       lj_plot1 <- ggplot(data2, aes(x = obs, y = `Median FI`, label = Violations))
@@ -1590,12 +1877,16 @@ server <- function(input, output, session) {
       geom_hline(yintercept = data2$lcl2, linetype = "longdash", color = "red", size = 1, alpha = 0.5)+
       geom_hline(aes(yintercept = ucl1, linetype = "cl1"), color = "red", size = 1, alpha = 0.5)+
       geom_hline(yintercept = data2$lcl1, linetype = "dotted", color = "red", size = 1, alpha = 0.5)+
-      geom_point(x = data2$obs , y = data2$`Median FI`, aes(color = status), size = 3)+
+      geom_point(x = data2$obs, 
+                 y = data2$`Median FI`, 
+                 aes(color = status), 
+                 size = 3)+
       labs(x = "Observation",
            y = "MFI",
            color = "",
            title = paste(set_sample, " ", input$chart_type, " Individuals"," Chart ", "(", set_ag, ")", sep = ""))+
       scale_y_continuous(labels = comma)+
+      scale_x_continuous(labels = number_format(accuracy = 1))+
       scale_color_manual(limits = vio_status,
                          values = status_colors)+
       scale_linetype_manual(name = "", values = c(3,2,1,1),
@@ -1606,6 +1897,44 @@ server <- function(input, output, session) {
             axis.text = element_text(size = 12),
             axis.title = element_text(size = 14),
             panel.border = element_rect(color = "black", fill = NA))
+  } else { #Observed concentration tracking 
+    
+    if (input$lj_choice == "Formatted Custom Data") {
+      lj_plot1 <- ggplot(data2, aes(x = obs, y = Concentration, label = Violations))
+    } else {
+      lj_plot1 <- ggplot(data2, aes(x = obs, y = Concentration, label = Violations, text = batch))
+    }
+    
+    lj_plot2 <- lj_plot1 +
+      geom_line(aes(group = 1), alpha = 0.5)+ # must specify group = 1 or else the lines won't show up
+      geom_hline(aes(yintercept = cl, linetype = "Mean"), color = "blue", size = 1, alpha = 0.4)+
+      geom_hline(aes(yintercept = ucl3, linetype = "cl3"), color = "red", size = 1, alpha = 0.5)+
+      geom_hline(yintercept = data2$lcl3, color = "red", size = 1, alpha = 0.5)+
+      geom_hline(aes(yintercept = ucl2, linetype = "cl2"), color = "red", size = 1, alpha = 0.5)+
+      geom_hline(yintercept = data2$lcl2, linetype = "longdash", color = "red", size = 1, alpha = 0.5)+
+      geom_hline(aes(yintercept = ucl1, linetype = "cl1"), color = "red", size = 1, alpha = 0.5)+
+      geom_hline(yintercept = data2$lcl1, linetype = "dotted", color = "red", size = 1, alpha = 0.5)+
+      geom_point(x = data2$obs, 
+                 y = data2$Concentration, 
+                 aes(color = status), 
+                 size = 3)+
+      labs(x = "Observation",
+           y = "Concentration",
+           color = "",
+           title = paste(set_sample, " ", input$chart_type, " Individuals"," Chart ", "(", set_ag, ")", sep = ""))+
+      scale_y_continuous(labels = comma)+
+      scale_x_continuous(labels = number_format(accuracy = 1))+
+      scale_color_manual(limits = vio_status,
+                         values = status_colors)+
+      scale_linetype_manual(name = "", values = c(3,2,1,1),
+                            guide = guide_legend(override.aes = list(color = c("red", "red", "red", "blue"))))+
+      theme(plot.title = element_text(size = 16, vjust = 0.5, face = "bold"),
+            legend.position = "bottom",
+            legend.text = element_text(size = 16),
+            axis.text = element_text(size = 12),
+            axis.title = element_text(size = 14),
+            panel.border = element_rect(color = "black", fill = NA))
+  }
     
     if (input$chart_type == "Shewhart") {
       
@@ -1653,8 +1982,9 @@ server <- function(input, output, session) {
     data2 <- data1 %>% 
       filter(sample == set_sample,
              antigen == set_ag) %>% 
-      rename(`Median FI` = median_fi, Violations = vio)
+      rename(`Median FI` = median_fi, Concentration = obs_conc, Violations = vio)
     
+  if (input$ct_var_choice == "MFI") {
     if (input$lj_choice == "Formatted Custom Data") {
       lj_plot1 <- ggplot(data2, aes(x = obs, y = `Median FI`))
     } else {
@@ -1670,12 +2000,17 @@ server <- function(input, output, session) {
       geom_hline(yintercept = data2$lcl2, linetype = "longdash", color = "red", size = 1, alpha = 0.5)+
       geom_hline(aes(yintercept = ucl1, linetype = "cl1"), color = "red", size = 1, alpha = 0.5)+
       geom_hline(yintercept = data2$lcl1, linetype = "dotted", color = "red", size = 1, alpha = 0.5)+
-      geom_point(x = data2$obs , y = data2$`Median FI`, aes(color = status), size = 3)+
+      geom_point(x = data2$obs, 
+                 y = data2$`Median FI`, 
+                 aes(color = status), 
+                 size = 3)+#,
+                 #show.legend = TRUE)+ #show.legend = TRUE used to override missing factor level omission in the legend.
       labs(x = "Observation",
            y = "MFI",
            color = "",
            title = paste(set_sample, " ", input$chart_type, " Individuals", " Chart ", "(", set_ag, ")", sep = ""))+
       scale_y_continuous(labels = comma)+
+      scale_x_continuous(labels = number_format(accuracy = 1))+
       scale_color_manual(limits = vio_status,
                          values = status_colors)+
       scale_linetype_manual(name = "", values = c(3,2,1,1),
@@ -1686,6 +2021,45 @@ server <- function(input, output, session) {
             axis.text = element_text(size = 12),
             axis.title = element_text(size = 14),
             panel.border = element_rect(color = "black", fill = NA))
+  } else { #observed concentration tracking starts here
+    
+    if (input$lj_choice == "Formatted Custom Data") {
+      lj_plot1 <- ggplot(data2, aes(x = obs, y = Concentration))
+    } else {
+      lj_plot1 <- ggplot(data2, aes(x = obs, y = Concentration, text = batch))
+    }
+    
+    lj_plot2 <- lj_plot1 +
+      geom_line(aes(group = 1), alpha = 0.5)+ # must specify group = 1 or else the lines won't show up
+      geom_hline(aes(yintercept = cl, linetype = "Mean"), color = "blue", size = 1, alpha = 0.4)+
+      geom_hline(aes(yintercept = ucl3, linetype = "cl3"), color = "red", size = 1, alpha = 0.5)+
+      geom_hline(yintercept = data2$lcl3, color = "red", size = 1, alpha = 0.5)+
+      geom_hline(aes(yintercept = ucl2, linetype = "cl2"), color = "red", size = 1, alpha = 0.5)+
+      geom_hline(yintercept = data2$lcl2, linetype = "longdash", color = "red", size = 1, alpha = 0.5)+
+      geom_hline(aes(yintercept = ucl1, linetype = "cl1"), color = "red", size = 1, alpha = 0.5)+
+      geom_hline(yintercept = data2$lcl1, linetype = "dotted", color = "red", size = 1, alpha = 0.5)+
+      geom_point(x = data2$obs, 
+                 y = data2$Concentration, 
+                 aes(color = status), 
+                 size = 3)+#,
+      #show.legend = TRUE)+ #show.legend = TRUE used to override missing factor level omission in the legend.
+      labs(x = "Observation",
+           y = "Concentration",
+           color = "",
+           title = paste(set_sample, " ", input$chart_type, " Individuals", " Chart ", "(", set_ag, ")", sep = ""))+
+      scale_y_continuous(labels = comma)+
+      scale_x_continuous(labels = number_format(accuracy = 1))+
+      scale_color_manual(limits = vio_status,
+                         values = status_colors)+
+      scale_linetype_manual(name = "", values = c(3,2,1,1),
+                            guide = guide_legend(override.aes = list(color = c("red", "red", "red", "blue"))))+
+      theme(plot.title = element_text(size = 16, vjust = 0.5, face = "bold"),
+            legend.position = "bottom",
+            legend.text = element_text(size = 16),
+            axis.text = element_text(size = 12),
+            axis.title = element_text(size = 14),
+            panel.border = element_rect(color = "black", fill = NA))
+  }
     
     if (input$chart_type == "Shewhart") {
       
@@ -1704,7 +2078,6 @@ server <- function(input, output, session) {
     for (i in 1:length(lj_plot3$x$data)) {
       
       if (!is.null(lj_plot3$x$data[[i]]$name)) {
-        
         lj_plot3$x$data[[i]]$name <- str_replace(lj_plot3$x$data[[i]]$name, "\\(", "") %>% 
           str_replace(",1\\)", "")
       }
@@ -1716,7 +2089,7 @@ server <- function(input, output, session) {
   
   display_mr_plot <- reactive({ # creates the point-to-point moving range plot
     
-    data1 <- mr_data()
+    data1 <- mr_data() %>% filter(obs >= 2)
     
     vio_status <- c(lj_status()[1], lj_status()[2])
     status_colors <- c("forestgreen", "red")
@@ -1739,19 +2112,27 @@ server <- function(input, output, session) {
     } else {
       lj_plot1 <- ggplot(data2, aes(x = obs, y = MR, text = batch))
     }
-    
+      
     lj_plot2 <- lj_plot1 +
       geom_line(aes(group = 1), alpha = 0.5)+ # must specify group = 1 or else the lines won't show up
       geom_hline(aes(yintercept = mr_avg, linetype = "Mean MR"), color = "blue", size = 1, alpha = 0.4)+
       geom_hline(aes(yintercept = mr_ucl, linetype = "UCL"), color = "red", size = 1, alpha = 0.5)+
-      geom_point(x = data2$obs , y = data2$MR, aes(color = status), size = 3)+
+      geom_point(x = data2$obs, 
+                 y = data2$MR, 
+                 aes(color = status), 
+                 size = 3)+#,
+                 #show.legend = TRUE)+ #show.legend = TRUE used to override missing factor level omission in the legend.
       labs(x = "Observation",
-           y = "Moving range (MFI)",
+           y = ifelse(input$ct_var_choice == "MFI", "Moving range (MFI)", "Moving range (concentration)"),
            color = "",
            title = paste(set_sample, " Moving Range Chart ", "(", set_ag, ")", sep = ""))+
       scale_y_continuous(labels = comma)+
+      scale_x_continuous(labels = number_format(accuracy = 1))+
       scale_color_manual(limits = vio_status,
-                         values = status_colors)+
+                         values = status_colors,
+                         na.translate = FALSE)+
+      scale_linetype_manual(name = "", values = c(1,1),
+                            guide = guide_legend(override.aes = list(color = c("blue", "red"))))+
       theme(plot.title = element_text(size = 16, vjust = 0.5, face = "bold"),
             legend.position = "bottom",
             legend.text = element_text(size = 16),
@@ -1805,10 +2186,11 @@ server <- function(input, output, session) {
       
       ag_name <- levels(fdata1$antigen2)
       
+      if (input$ct_var_choice == "MFI") {
       b1_plot <- ggplot(df, aes(x = obs , y = median_fi))+
         facet_wrap(.~sample,
                    scales = "free")+
-        geom_line(alpha = 0.5)+
+        geom_line(alpha = 0.5, show.legend = FALSE)+
         geom_hline(aes(yintercept = cl, linetype = "Mean"), color = "blue", size = 1, alpha = 0.4)+
         geom_hline(aes(yintercept = ucl3, linetype = "cl3"), color = "red", size = 1, alpha = 0.5)+
         geom_hline(aes(yintercept = lcl3, linetype = "cl3"), color = "red", size = 1, alpha = 0.5)+
@@ -1816,23 +2198,60 @@ server <- function(input, output, session) {
         geom_hline(aes(yintercept = lcl2, linetype = "cl2"), color = "red", size = 1, alpha = 0.5)+
         geom_hline(aes(yintercept = ucl1, linetype = "cl1"), color = "red", size = 1, alpha = 0.5)+
         geom_hline(aes(yintercept = lcl1, linetype = "cl1"), color = "red", size = 1, alpha = 0.5)+
-        geom_point(aes(x = obs , y = median_fi, color = status), size = 4)+
+        geom_point(aes(x = obs , y = median_fi, color = status), 
+                   size = 4,
+                   show.legend = c(color = TRUE, linetype = FALSE))+ # This ensures that all status point colors are in the legend while preventing points from appearing in the hline legend. 
         labs(x = "Observation",
              y = "MFI",
              color = "",
              title = paste0(input$chart_type, " Individuals ", "(", ag_name, ")"))+
         scale_y_continuous(labels = comma)+
+        scale_x_continuous(labels = number_format(accuracy = 1))+
         scale_color_manual(limits = vio_status, 
                            values = status_colors)+
-        scale_linetype_manual(name = "", values = c(3,2,1,1),
-                              guide = guide_legend(override.aes = list(color = c("red", "red", "red", "blue"))))+
+        scale_linetype_manual(name = "", values = c(3,2,1,1))+#,
+                              #guide = guide_legend(override.aes = list(color = c("red", "red", "red", "blue"))))+
         theme(plot.title = element_text(size = 40, vjust = 0.5, face = "bold"),
               legend.position = "bottom",
               legend.text = element_text(size = 24),
+              legend.key.size = unit(2, "cm"),
               axis.text = element_text(size = 16),
               axis.title = element_text(size = 24),
               strip.text.x = element_text(size = 26),
               panel.border = element_rect(color = "black", fill = NA))
+      } else {#observed concentration
+        b1_plot <- ggplot(df, aes(x = obs , y = obs_conc))+
+          facet_wrap(.~sample,
+                     scales = "free")+
+          geom_line(alpha = 0.5, show.legend = FALSE)+
+          geom_hline(aes(yintercept = cl, linetype = "Mean"), color = "blue", size = 1, alpha = 0.4)+
+          geom_hline(aes(yintercept = ucl3, linetype = "cl3"), color = "red", size = 1, alpha = 0.5)+
+          geom_hline(aes(yintercept = lcl3, linetype = "cl3"), color = "red", size = 1, alpha = 0.5)+
+          geom_hline(aes(yintercept = ucl2, linetype = "cl2"), color = "red", size = 1, alpha = 0.5)+
+          geom_hline(aes(yintercept = lcl2, linetype = "cl2"), color = "red", size = 1, alpha = 0.5)+
+          geom_hline(aes(yintercept = ucl1, linetype = "cl1"), color = "red", size = 1, alpha = 0.5)+
+          geom_hline(aes(yintercept = lcl1, linetype = "cl1"), color = "red", size = 1, alpha = 0.5)+
+          geom_point(aes(x = obs , y = obs_conc, color = status), 
+                     size = 4,
+                     show.legend = c(color = TRUE, linetype = FALSE))+ # This ensures that all status point colors are in the legend while preventing points from appearing in the hline legend. 
+          labs(x = "Observation",
+               y = "Concentration",
+               color = "",
+               title = paste0(input$chart_type, " Individuals ", "(", ag_name, ")"))+
+          scale_y_continuous(labels = comma)+
+          scale_x_continuous(labels = number_format(accuracy = 1))+
+          scale_color_manual(limits = vio_status, 
+                             values = status_colors)+
+          scale_linetype_manual(name = "", values = c(3,2,1,1))+#,
+          theme(plot.title = element_text(size = 40, vjust = 0.5, face = "bold"),
+                legend.position = "bottom",
+                legend.text = element_text(size = 24),
+                legend.key.size = unit(2, "cm"),
+                axis.text = element_text(size = 16),
+                axis.title = element_text(size = 24),
+                strip.text.x = element_text(size = 26),
+                panel.border = element_rect(color = "black", fill = NA))
+        }
       
       if (input$chart_type == "Shewhart") {
         
@@ -1881,18 +2300,22 @@ server <- function(input, output, session) {
         geom_line(alpha = 0.5)+
         geom_hline(aes(yintercept = mr_avg, linetype = "Mean MR"), color = "blue", size = 1, alpha = 0.4)+
         geom_hline(aes(yintercept = mr_ucl, linetype = "UCL"), color = "red", size = 1, alpha = 0.5)+
-        geom_point(aes(x = obs , y = mr, color = status), size = 4)+
+        geom_point(aes(x = obs , y = mr, color = status), 
+                   size = 4,
+                   show.legend = c(color = TRUE, linetype = FALSE))+ # This ensures that all status point colors are in the legend while preventing points from appearing in the hline legend.
         labs(x = "Observation",
-             y = "Moving Range (MFI)",
+             y = ifelse(input$ct_var_choice == "MFI", "Moving range (MFI)", "Moving range (concentration)"),
              color = "",
              title = paste0("Moving Range Chart ", "(", ag_name, ")"))+
         scale_y_continuous(labels = comma)+
+        scale_x_continuous(labels = number_format(accuracy = 1))+
         scale_color_manual(limits = vio_status, 
                            values = status_colors)+
         theme(plot.title = element_text(size = 40, vjust = 0.5, face = "bold"),
               legend.position = "bottom",
               legend.text = element_text(size = 24),
               legend.title = element_blank(),
+              legend.key.size = unit(2, "cm"),
               axis.text = element_text(size = 16),
               axis.title = element_text(size = 24),
               strip.text.x = element_text(size = 26),
@@ -1951,6 +2374,12 @@ server <- function(input, output, session) {
         errorClass = "ct")
     }
     
+    if (input$ct_var_choice == "Concentration") { # Generates an error message if no observed concentration values are present.
+      validate(
+        need(!all(is.na(lj_xp_data()$obs_conc)), "No observed concentration values present."),
+        errorClass = "ct")
+    }
+    
     if (input$lj_type == "Nelson Rules"){
       display_lj_plot()
     } else {
@@ -1962,6 +2391,12 @@ server <- function(input, output, session) {
     if (input$lj_choice == "xPONENT/Bio-Plex Manager") {
       validate(
         need(!is.null(input$samples2) & !is.null(input$ag_spec), ""))
+    }
+    
+    if (input$ct_var_choice == "Concentration") { # Generates an error message if no observed concentration values are present.
+      validate(
+        need(!all(is.na(lj_xp_data()$obs_conc)), "No observed concentration values present."),
+        errorClass = "ct")
     }
     
     display_mr_plot()
@@ -1987,8 +2422,13 @@ server <- function(input, output, session) {
         errorClass = "ct")
     }
     
+    if (input$ct_var_choice == "Concentration") { # Generates an error message if no observed concentration values are present.
+      validate(
+        need(!all(is.na(lj_xp_data()$obs_conc)), "No observed concentration values present."),
+        errorClass = "ct")
+    }
+    
     if (input$lj_type == "Nelson Rules") {
-      
       nelson_summary_small()
     } else {
       cl23_summary_small()
@@ -2004,27 +2444,60 @@ server <- function(input, output, session) {
         errorClass = "ct")
     }
     
+    if (input$ct_var_choice == "Concentration") { # Generates an error message if no observed concentration values are present.
+      validate(
+        need(!all(is.na(lj_xp_data()$obs_conc)), "No observed concentration values present."),
+        errorClass = "ct")
+    }
+    
     if (input$chart_type == "Levey-Jennings") { #Levey-Jennings analysis column names
-      nelson_cols <- c("Control", "Antigen", "n", "n Missing", "Mean MFI", "Mean MR", "MR UCL", "Median MFI", "Max MFI", "Min MFI", "MFI SD",
+      nelson_cols_mfi <- c("Control", "Antigen", "n", "n Missing", "Mean MFI", "Mean MR", "MR UCL", "Median MFI", "Max MFI", "Min MFI", "MFI SD",
+                       "UCL3", "LCL3", "UCL2", "LCL2", "UCL1", "LCL1", "% OOC ", "Total Violations",
+                       "n R1", "n R2", "n R3", "n R4", "n R5", "n R6", "n R7", "n R8")
+      
+      nelson_cols_conc <- c("Control", "Antigen", "n", "n Missing", "Mean Concentration", "Mean MR", "MR UCL", "Median Concentration", "Max Concentration", "Min Concentration", "Concentration SD",
                        "UCL3", "LCL3", "UCL2", "LCL2", "UCL1", "LCL1", "% OOC ", "Total Violations",
                        "n R1", "n R2", "n R3", "n R4", "n R5", "n R6", "n R7", "n R8")
     } else { #Shewart analysis column names
-      nelson_cols <- c("Control", "Antigen", "n", "n Missing", "Mean MFI", "Mean MR", "MR UCL", "Median MFI", "Max MFI", "Min MFI", "MFI SD",
+      nelson_cols_mfi <- c("Control", "Antigen", "n", "n Missing", "Mean MFI", "Mean MR", "MR UCL", "Median MFI", "Max MFI", "Min MFI", "MFI SD",
+                            "UCL3", "LCL3", "UCL2", "LCL2", "UCL1", "LCL1", "% OOC ", "Total Violations",
+                            "n R1", "n R2", "n R3", "n R4")
+      
+      nelson_cols_conc <- c("Control", "Antigen", "n", "n Missing", "Mean Concentration", "Mean MR", "MR UCL", "Median Concentration", "Max Concentration", "Min Concentration", "Concentration SD",
                        "UCL3", "LCL3", "UCL2", "LCL2", "UCL1", "LCL1", "% OOC ", "Total Violations",
                        "n R1", "n R2", "n R3", "n R4")
     }
     
+    cl23_cols_mfi <- c("Control", "Antigen", "n", "n Missing", "Mean MFI", "Mean MR", "MR UCL", "Median MFI", "Max MFI", "Min MFI", "MFI SD",
+                       "UCL3", "LCL3", "UCL2", "LCL2", "n Outside CL3", "% Outside CL3", "n CL2-CL3", "% CL2-CL3")
+    
+    cl23_cols_conc <- c("Control", "Antigen", "n", "n Missing", "Mean Concentration", "Mean MR", "MR UCL", "Median Concentration", "Max Concentration", "Min Concentration", "Concentration SD",
+                       "UCL3", "LCL3", "UCL2", "LCL2", "n Outside CL3", "% Outside CL3", "n CL2-CL3", "% CL2-CL3")
+    
     if (input$lj_type == "Nelson Rules") { # uses this if Nelson rule violations are selected
+      if (input$ct_var_choice == "MFI") {
       datatable(nelson_summary(), 
-                colnames = nelson_cols,
-                rownames = FALSE,
-                options = list( scrollCollapse = TRUE))
-    } else { # uses this if CL2-CL3 violations are selected
-      datatable(cl23_summary(), 
-                colnames = c("Control", "Antigen", "n", "n Missing", "Mean MFI", "Mean MR", "MR UCL", "Median MFI", "Max MFI", "Min MFI", "MFI SD",
-                             "UCL3", "LCL3", "UCL2", "LCL2", "n Outside CL3", "% Outside CL3", "n CL2-CL3", "% CL2-CL3"),
+                colnames = nelson_cols_mfi,
                 rownames = FALSE,
                 options = list(scrollCollapse = TRUE))
+      } else {
+        datatable(nelson_summary(), 
+                  colnames = nelson_cols_conc,
+                  rownames = FALSE,
+                  options = list(scrollCollapse = TRUE))
+      }
+    } else { # uses this if CL2-CL3 violations are selected
+      if (input$ct_var_choice == "MFI") {
+      datatable(cl23_summary(), 
+                colnames = cl23_cols_mfi,
+                rownames = FALSE,
+                options = list(scrollCollapse = TRUE))
+      } else {
+        datatable(cl23_summary(), 
+                  colnames = cl23_cols_conc,
+                  rownames = FALSE,
+                  options = list(scrollCollapse = TRUE))
+      }
     }
   })
   
@@ -2047,15 +2520,18 @@ server <- function(input, output, session) {
     ## Merged data and repeat summaries ##
   observeEvent(input$action3, { # this tells shiny what to do when the "action3" button is clicked
     
+    # shinyalert(title = "Now Generating Datasets",
+    #            text  = "Please wait until the app is finished before using other features.",
+    #            type = "",
+    #            confirmButtonCol = "#5dade2",
+    #            imageUrl = "https://media.giphy.com/media/uprwwjptZW4Za/giphy.gif", #spongebob and patrick assembling the data
+    #            imageWidth = 335,
+    #            imageHeight = 250)
+    
     shinyalert(title = "Now Generating Datasets",
                text  = "Please wait until the app is finished before using other features.",
                type = "",
-               confirmButtonCol = "#5dade2"#,
-               #imageUrl = "https://media.giphy.com/media/uprwwjptZW4Za/giphy.gif", #spongebob and patrick assembling the data
-               #imageWidth = 335,
-               #imageHeight = 250
-               )
-    
+               confirmButtonCol = "#5dade2")
     
     withProgress(message = "Downloading merged data set...", value = 0, { #this adds in a download progress bar
       
@@ -2124,17 +2600,19 @@ server <- function(input, output, session) {
       
       zipr_append(zipfile = paste0(tempdir(), "/", "raw_sum_data.zip"), # adds the summary results .xlsx file to the zip folder
                   files = paste0(tempdir(), "/", "summary_results.xlsx"))
-      
-      
+
+      # shinyalert(title = "Done!",
+      #            text = "Datasets are now ready to be downloaded.",
+      #            type = "success",
+      #            confirmButtonCol = "#5dade2",
+      #            imageUrl = "https://media.giphy.com/media/26u4lOMA8JKSnL9Uk/giphy.gif", #spongebob wiping his hands
+      #            imageWidth = 335,
+      #            imageHeight = 250)
       
       shinyalert(title = "Done!",
                  text = "Datasets are now ready to be downloaded.",
                  type = "success",
-                 confirmButtonCol = "#5dade2"#,
-                 #imageUrl = "https://media.giphy.com/media/26u4lOMA8JKSnL9Uk/giphy.gif", #spongebob wiping his hands
-                 #imageWidth = 335,
-                 #imageHeight = 250
-                 )
+                 confirmButtonCol = "#5dade2")
       
       enable("uthresh") # user widgets enabled again once the download is complete
       enable("lthresh")
@@ -2154,15 +2632,18 @@ server <- function(input, output, session) {
     ## Bead count fluctuation plots ##
   observeEvent(input$action, { # this tells shiny what to do when the "action" button is clicked
     
+    # shinyalert(title = "Now Generating Plots",
+    #            text  = "Please wait until the app is finished before using other features.",
+    #            type = "",
+    #            confirmButtonCol = "#5dade2",
+    #            imageUrl = "https://media.giphy.com/media/xT1R9ZORSvL6jtqOeQ/giphy.gif",
+    #            imageWidth = 320,
+    #            imageHeight = 180)
+    
     shinyalert(title = "Now Generating Plots",
                text  = "Please wait until the app is finished before using other features.",
                type = "",
-               confirmButtonCol = "#5dade2"#,
-               #imageUrl = "https://media.giphy.com/media/xT1R9ZORSvL6jtqOeQ/giphy.gif",
-               #imageWidth = 320,
-               #imageHeight = 180
-               )
-    
+               confirmButtonCol = "#5dade2")
     
     disable("bqcplots")
     
@@ -2194,14 +2675,18 @@ server <- function(input, output, session) {
       zipr(zipfile = paste0(tempdir(), "/", "Bead QC plots.zip"), # zips all of the QC plots together
            files = plot_list)
       
+      # shinyalert(title = "Done!",
+      #            text = "Plots are now ready to be downloaded!",
+      #            type = "success",
+      #            confirmButtonCol = "#5dade2",
+      #            imageUrl = "https://media.giphy.com/media/xUNd9MHCLPVyBIpNbW/giphy.gif",
+      #            imageWidth = 320,
+      #            imageHeight = 180)
+      
       shinyalert(title = "Done!",
                  text = "Plots are now ready to be downloaded!",
                  type = "success",
-                 confirmButtonCol = "#5dade2"#,
-                 #imageUrl = "https://media.giphy.com/media/xUNd9MHCLPVyBIpNbW/giphy.gif",
-                 #imageWidth = 320,
-                 #imageHeight = 180
-                 )
+                 confirmButtonCol = "#5dade2")
       
       enable("bqcplots")
     })
@@ -2219,14 +2704,18 @@ server <- function(input, output, session) {
           # See the "Bead count fluctuation plots" section for code explanations #
   observeEvent(input$action2, {
     
+    # shinyalert(title = "Now Generating Plots",
+    #            text  = "Please wait until the app is finished before using other features.",
+    #            type = "",
+    #            confirmButtonCol = "#5dade2",
+    #            imageUrl = "https://media.giphy.com/media/HUplkVCPY7jTW/giphy.gif", # magic computer doing all the things
+    #            imageWidth = 250,
+    #            imageHeight = 350)
+    
     shinyalert(title = "Now Generating Plots",
                text  = "Please wait until the app is finished before using other features.",
                type = "",
-               confirmButtonCol = "#5dade2"#,
-               #imageUrl = "https://media.giphy.com/media/HUplkVCPY7jTW/giphy.gif", # magic computer doing all the things
-               #imageWidth = 250,
-               #imageHeight = 350
-               )
+               confirmButtonCol = "#5dade2")
     
     disable("plateplotsaver")
     
@@ -2257,14 +2746,18 @@ server <- function(input, output, session) {
       zipr(zipfile = paste0(tempdir(), "/", "Bead QC plate plots.zip"),
            files = plot_list)
       
+      # shinyalert(title = "Done!",
+      #            text = "Plots are now ready to be downloaded!",
+      #            type = "success",
+      #            confirmButtonCol = "#5dade2",
+      #            imageUrl = "https://media.giphy.com/media/3ohryiYkE0DVwdLAys/giphy.gif",
+      #            imageWidth = 250,
+      #            imageHeight = 250)
+      
       shinyalert(title = "Done!",
                  text = "Plots are now ready to be downloaded!",
                  type = "success",
-                 confirmButtonCol = "#5dade2",
-                 #imageUrl = "https://media.giphy.com/media/3ohryiYkE0DVwdLAys/giphy.gif",
-                 #imageWidth = 250,
-                 #imageHeight = 250
-                 )
+                 confirmButtonCol = "#5dade2")
       
       enable("plateplotsaver")
     })
@@ -2283,14 +2776,18 @@ server <- function(input, output, session) {
           # See the "Bead count fluctuation plots" section for code explanations #
   observeEvent(input$action5, {
     
+    # shinyalert(title = "Now Generating Plots",
+    #            text  = "Please wait until the app is finished before using other features.",
+    #            type = "",
+    #            confirmButtonCol = "#5dade2",
+    #            imageUrl = "https://media.giphy.com/media/DIbzujHh2PCbm/giphy.gif", # magic computer doing all the things
+    #            imageWidth = 281,
+    #            imageHeight = 225)
+    
     shinyalert(title = "Now Generating Plots",
                text  = "Please wait until the app is finished before using other features.",
                type = "",
-               confirmButtonCol = "#5dade2"#,
-               #imageUrl = "https://media.giphy.com/media/DIbzujHh2PCbm/giphy.gif", # magic computer doing all the things
-               #imageWidth = 281,
-               #imageHeight = 225
-               )
+               confirmButtonCol = "#5dade2")
     
     disable("plateplotsaver_mfi")
     
@@ -2322,13 +2819,18 @@ server <- function(input, output, session) {
       zipr(zipfile = paste0(tempdir(), "/", "MFI QC plate plots.zip"),
            files = plot_list)
       
+      # shinyalert(title = "Done!",
+      #            text = "Plots are now ready to be downloaded!",
+      #            type = "success",
+      #            confirmButtonCol = "#5dade2",
+      #            imageUrl = "https://media.giphy.com/media/mJHSkWKziszrkcNJPo/giphy.gif",
+      #            imageWidth = 350,
+      #            imageHeight = 200)
+      
       shinyalert(title = "Done!",
                  text = "Plots are now ready to be downloaded!",
                  type = "success",
-                 confirmButtonCol = "#5dade2",
-                 imageUrl = "https://media.giphy.com/media/mJHSkWKziszrkcNJPo/giphy.gif",
-                 imageWidth = 350,
-                 imageHeight = 200)
+                 confirmButtonCol = "#5dade2")
       
       enable("plateplotsaver_mfi")
     })
@@ -2345,14 +2847,18 @@ server <- function(input, output, session) {
     ## MFI heat maps ##
   observeEvent(input$action7, {
     
+    # shinyalert(title = "Now Generating Plots",
+    #            text  = "Please wait until the app is finished before using other features.",
+    #            type = "",
+    #            confirmButtonCol = "#5dade2",
+    #            imageUrl = "https://media.giphy.com/media/DIbzujHh2PCbm/giphy.gif", # magic computer doing all the things
+    #            imageWidth = 281,
+    #            imageHeight = 225)
+    
     shinyalert(title = "Now Generating Plots",
                text  = "Please wait until the app is finished before using other features.",
                type = "",
-               confirmButtonCol = "#5dade2"#,
-               #imageUrl = "https://media.giphy.com/media/DIbzujHh2PCbm/giphy.gif", # magic computer doing all the things
-               #imageWidth = 281,
-               #imageHeight = 225
-               )
+               confirmButtonCol = "#5dade2")
     
     disable("heatmapsaver_mfi")
     
@@ -2384,14 +2890,18 @@ server <- function(input, output, session) {
       zipr(zipfile = paste0(tempdir(), "/", "MFI Heat Maps.zip"),
            files = plot_list)
       
+      # shinyalert(title = "Done!",
+      #            text = "Plots are now ready to be downloaded!",
+      #            type = "success",
+      #            confirmButtonCol = "#5dade2",
+      #            imageUrl = "https://media.giphy.com/media/mJHSkWKziszrkcNJPo/giphy.gif",
+      #            imageWidth = 350,
+      #            imageHeight = 200)
+      
       shinyalert(title = "Done!",
                  text = "Plots are now ready to be downloaded!",
                  type = "success",
-                 confirmButtonCol = "#5dade2"#,
-                 #imageUrl = "https://media.giphy.com/media/mJHSkWKziszrkcNJPo/giphy.gif",
-                 #imageWidth = 350,
-                 #imageHeight = 200
-                 )
+                 confirmButtonCol = "#5dade2")
       
       enable("heatmapsaver_mfi")
     })
@@ -2408,14 +2918,18 @@ server <- function(input, output, session) {
           # See the "Bead count fluctuation plots" section for code explanations #
   observeEvent(input$action4, {
     
+    # shinyalert(title = "Now Generating Plots",
+    #            text  = "Please wait until the app is finished before using other features.",
+    #            type = "",
+    #            confirmButtonCol = "#5dade2",
+    #            imageUrl = "https://media.giphy.com/media/3oKIPEqDGUULpEU0aQ/giphy.gif",
+    #            imageWidth = 300,
+    #            imageHeight = 300)
+    
     shinyalert(title = "Now Generating Plots",
                text  = "Please wait until the app is finished before using other features.",
                type = "",
-               confirmButtonCol = "#5dade2"#,
-               #imageUrl = "https://media.giphy.com/media/3oKIPEqDGUULpEU0aQ/giphy.gif",
-               #imageWidth = 300,
-               #imageHeight = 300
-               )
+               confirmButtonCol = "#5dade2")
     
     withProgress(message = "Assembling control tracking plots", value = 0, {
       
@@ -2453,14 +2967,18 @@ server <- function(input, output, session) {
       zipr(zipfile = paste0(tempdir(), "/", "Control tracking plots.zip"),
            files = plot_list)
       
+      # shinyalert(title = "Done!",
+      #            text = "Control tracking plots are now ready to be downloaded.",
+      #            type = "success",
+      #            confirmButtonCol = "#5dade2",
+      #            imageUrl = "https://media.giphy.com/media/3og0IUzdgwVczU67eg/giphy.gif",
+      #            imageWidth = 300,
+      #            imageHeight = 225)
+      
       shinyalert(title = "Done!",
                  text = "Control tracking plots are now ready to be downloaded.",
                  type = "success",
-                 confirmButtonCol = "#5dade2"#,
-                 #imageUrl = "https://media.giphy.com/media/3og0IUzdgwVczU67eg/giphy.gif",
-                 #imageWidth = 300,
-                 #imageHeight = 225
-                 )
+                 confirmButtonCol = "#5dade2")
       
       enable("ljsaver")
     })
@@ -2477,15 +2995,18 @@ server <- function(input, output, session) {
         # See "Merged data and repeat summaries" section for code explanation #
   observeEvent(input$action6, {
     
+    # shinyalert(title = "Now Generating Control Tracking Summary Tables",
+    #            text  = "Please wait until the app is finished before using other features.",
+    #            type = "",
+    #            confirmButtonCol = "#5dade2",
+    #            imageUrl = "https://media.giphy.com/media/uprwwjptZW4Za/giphy.gif", #spongebob and patrick assembling the data
+    #            imageWidth = 335,
+    #            imageHeight = 250)
+    
     shinyalert(title = "Now Generating Control Tracking Summary Tables",
                text  = "Please wait until the app is finished before using other features.",
                type = "",
-               confirmButtonCol = "#5dade2"#,
-               #imageUrl = "https://media.giphy.com/media/uprwwjptZW4Za/giphy.gif", #spongebob and patrick assembling the data
-               #imageWidth = 335,
-               #imageHeight = 250
-               )
-    
+               confirmButtonCol = "#5dade2")
     
     withProgress(message = "Assembling control tracking summary results...", value = 0, { #this adds in a download progress bar
       
@@ -2552,14 +3073,18 @@ server <- function(input, output, session) {
       
       ###
       
+      # shinyalert(title = "Done!",
+      #            text = "Summary tables are now ready to be downloaded.",
+      #            type = "success",
+      #            confirmButtonCol = "#5dade2",
+      #            imageUrl = "https://media.giphy.com/media/26u4lOMA8JKSnL9Uk/giphy.gif", 
+      #            imageWidth = 335,
+      #            imageHeight = 250)
+      
       shinyalert(title = "Done!",
                  text = "Summary tables are now ready to be downloaded.",
                  type = "success",
-                 confirmButtonCol = "#5dade2"#,
-                 # imageUrl = "https://media.giphy.com/media/26u4lOMA8JKSnL9Uk/giphy.gif", 
-                 # imageWidth = 335,
-                 # imageHeight = 250
-                 )
+                 confirmButtonCol = "#5dade2")
       
       enable("uthresh") # user widgets enabled again once the download is complete
       enable("lthresh")
